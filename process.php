@@ -1,4 +1,7 @@
 <?php
+header('Content-Type: text/html; charset=utf-8');
+mb_internal_encoding("UTF-8");
+
 require 'db.php';
 use PHPMailer\PHPMailer\PHPMailer;
 use PHPMailer\PHPMailer\Exception;
@@ -7,18 +10,20 @@ require 'PHPMailer/src/Exception.php';
 require 'PHPMailer/src/PHPMailer.php';
 require 'PHPMailer/src/SMTP.php';
 
-// ১. টেম্পলেট লোড করা (Subject & Body)
+// ১. টেম্পলেট ও সেন্ডার নেম লোড
 $campaign_res = $conn->query("SELECT * FROM email_campaign WHERE id=1");
 if($campaign_res->num_rows > 0){
     $campaign = $campaign_res->fetch_assoc();
     $emailSubject = $campaign['subject'];
     $emailBody = $campaign['body'];
+    $senderName = $campaign['sender_name'] ?? 'Support Team';
 } else {
-    $emailSubject = "Test Email";
-    $emailBody = "This is a test email.";
+    $emailSubject = "Notification";
+    $emailBody = "Default message.";
+    $senderName = "Support Team";
 }
 
-// ২. ক্লায়েন্ট সিলেক্ট করা (Pending)
+// ২. ক্লায়েন্ট সিলেক্ট
 $limit = 5; 
 $sql = "SELECT * FROM clients WHERE status = 'Pending' LIMIT $limit";
 $result = $conn->query($sql);
@@ -33,18 +38,18 @@ if (count($clients) == 0) {
     exit;
 }
 
-// ৩. সেন্ডার সিলেক্ট করা
+// ৩. SMTP সিলেক্ট
 $smtp_sql = "SELECT * FROM smtp_accounts WHERE today_sent < daily_limit ORDER BY RAND() LIMIT 1";
 $smtp_result = $conn->query($smtp_sql);
 
 if ($smtp_result->num_rows == 0) {
-    echo json_encode(['status' => 'error', 'message' => 'No SMTP account available or limit exceeded!']);
+    echo json_encode(['status' => 'error', 'message' => 'Limit Exceeded! Please Reset Quota from Dashboard.']);
     exit;
 }
 
 $sender = $smtp_result->fetch_assoc();
 
-// ৪. মেইল পাঠানো শুরু
+// ৪. মেইল সেন্ডিং
 $sent_count = 0;
 $log = "";
 $mail = new PHPMailer(true);
@@ -57,37 +62,26 @@ try {
     $mail->Password   = $sender['password']; 
     $mail->SMTPSecure = PHPMailer::ENCRYPTION_STARTTLS;
     $mail->Port       = $sender['port'];
-    
-    // SSL Fix for XAMPP
-    $mail->SMTPOptions = array(
-        'ssl' => array(
-            'verify_peer' => false,
-            'verify_peer_name' => false,
-            'allow_self_signed' => true
-        )
-    );
+    $mail->CharSet = 'UTF-8';
+    $mail->SMTPOptions = array('ssl' => array('verify_peer' => false, 'verify_peer_name' => false, 'allow_self_signed' => true));
 
-    $mail->setFrom($sender['email'], 'Support Team'); // আপনার ব্র্যান্ড নেম দিন
+    $mail->setFrom($sender['email'], $senderName); // Custom Name
 
     foreach ($clients as $client) {
         try {
             $mail->addAddress($client['email']);
             $mail->isHTML(true);
-            
-            // ডাটাবেস থেকে পাওয়া সাবজেক্ট এবং বডি সেট করা
             $mail->Subject = $emailSubject;
             $mail->Body    = $emailBody;
-
             $mail->send();
 
             $conn->query("UPDATE clients SET status = 'Sent' WHERE id = " . $client['id']);
             $sent_count++;
-            $log .= "<div class='log-entry text-success'>✅ Sent to: " . $client['email'] . "</div>";
+            $log .= "<div class='text-success'>✅ Sent to: " . $client['email'] . "</div>";
             $mail->clearAddresses();
-            
         } catch (Exception $e) {
              $conn->query("UPDATE clients SET status = 'Failed' WHERE id = " . $client['id']);
-             $log .= "<div class='log-entry text-danger'>❌ Failed: " . $client['email'] . "</div>";
+             $log .= "<div class='text-danger'>❌ Failed: " . $client['email'] . "</div>";
         }
     }
 
