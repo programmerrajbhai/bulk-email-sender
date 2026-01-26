@@ -8,9 +8,15 @@ require 'PHPMailer/src/PHPMailer.php';
 require 'PHPMailer/src/SMTP.php';
 
 // ১. টেম্পলেট লোড করা (Subject & Body)
-$campaign = $conn->query("SELECT * FROM email_campaign WHERE id=1")->fetch_assoc();
-$emailSubject = $campaign['subject'];
-$emailBody = $campaign['body'];
+$campaign_res = $conn->query("SELECT * FROM email_campaign WHERE id=1");
+if($campaign_res->num_rows > 0){
+    $campaign = $campaign_res->fetch_assoc();
+    $emailSubject = $campaign['subject'];
+    $emailBody = $campaign['body'];
+} else {
+    $emailSubject = "Test Email";
+    $emailBody = "This is a test email.";
+}
 
 // ২. ক্লায়েন্ট সিলেক্ট করা (Pending)
 $limit = 5; 
@@ -61,7 +67,7 @@ try {
         )
     );
 
-    $mail->setFrom($sender['email'], 'Bulk System'); // এখানে নাম চেঞ্জ করতে পারেন
+    $mail->setFrom($sender['email'], 'Support Team'); // আপনার ব্র্যান্ড নেম দিন
 
     foreach ($clients as $client) {
         try {
