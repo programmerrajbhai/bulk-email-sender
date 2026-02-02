@@ -115,7 +115,7 @@
                 <i class="fas fa-info-circle fs-4 text-primary me-3"></i>
                 <div><strong>Format:</strong> <code>email@gmail.com|app_password</code> (One per line)</div>
             </div>
-            <textarea id="smtpInput" class="form-control p-3 font-monospace" rows="10" placeholder="user1@gmail.com|abcd1234&#10;user2@outlook.com|pass123"></textarea>
+            <textarea id="smtpInput" class="form-control p-3 font-monospace" rows="10" placeholder="user1@outlook.com|app_pass&#10;user2@gmail.com|app_pass"></textarea>
             <button class="btn btn-primary w-100 py-3 mt-3 fw-bold rounded-3" onclick="addSmtp()"><i class="fas fa-plus-circle me-2"></i> Add Accounts</button>
         </div>
     </div>
@@ -205,7 +205,10 @@
         function batch(){
             if(!isSending) return;
             $.post('process.php', function(res){
-                if(typeof res === 'string') { try { res = JSON.parse(res); } catch(e) { console.error("Parse Error:", res); return; } }
+                if(typeof res === 'string') { 
+                    try { res = JSON.parse(res); } 
+                    catch(e) { console.error("Parse Error:", res); retryBatch(); return; } 
+                }
                 refreshStats();
                 if(res.status == 'finished'){
                     isSending = false;
@@ -217,10 +220,21 @@
                     $('#startBtn').prop('disabled', false).html('<i class="fas fa-rocket me-2"></i> START BLAST');
                 } else {
                     $('#logs').prepend('<div>' + res.log + '</div>');
+                    // সফল হলে ১ সেকেন্ড পর পরেরটা
                     setTimeout(batch, 1000);
                 }
+            }).fail(function() {
+                // নেটওয়ার্ক ফেল করলে রিকানেক্ট চেষ্টা করবে
+                retryBatch();
             });
         }
+        
+        function retryBatch() {
+            if(!isSending) return;
+            $('#logs').prepend('<div style="color:orange">⚠ Network error! Retrying in 3s...</div>');
+            setTimeout(batch, 3000);
+        }
+        
         batch();
     }
 
