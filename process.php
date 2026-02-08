@@ -1,13 +1,12 @@
 <?php
-// Strict Error Reporting Off for Production
+// Strict Error Reporting Off
 error_reporting(0);
 header('Content-Type: application/json; charset=utf-8');
 
 require 'db.php';
 
-// PHPMailer চেক
 if (!file_exists('PHPMailer/src/PHPMailer.php')) {
-    echo json_encode(['status' => 'error', 'log' => "<span style='color:red'>PHPMailer Missing! Upload PHPMailer folder.</span>"]);
+    echo json_encode(['status' => 'error', 'log' => "<span style='color:red'>PHPMailer Missing!</span>"]);
     exit;
 }
 
@@ -19,50 +18,50 @@ use PHPMailer\PHPMailer\PHPMailer;
 use PHPMailer\PHPMailer\Exception;
 use PHPMailer\PHPMailer\SMTP;
 
-// ১. ক্লায়েন্ট সিলেক্ট (যাকে মেইল পাঠানো হয়নি)
+// ১. পেন্ডিং ক্লায়েন্ট সিলেক্ট
 $client_res = $conn->query("SELECT * FROM clients WHERE status = 'Pending' LIMIT 1");
 if ($client_res->num_rows == 0) {
     echo json_encode(['status' => 'finished']);
     exit;
 }
 $client = $client_res->fetch_assoc();
+$to_email = strtolower($client['email']);
 
-// ২. SMTP রোটেশন (Smart Round Robin with Load Balancing)
-// লজিক: যার কোটা আছে এবং অনেকক্ষণ ব্যবহার হয়নি তাকে আগে নাও
-$smtp_res = $conn->query("SELECT * FROM smtp_accounts WHERE today_sent < daily_limit ORDER BY last_used ASC, id ASC LIMIT 1");
+// ২. SMTP সিলেকশন (Smart Routing Logic)
+$smtp = null;
+$domain_match = false;
 
-if ($smtp_res->num_rows == 0) {
-    echo json_encode(['status' => 'quota_error']);
-    exit;
+// ডোমেইন ডিটেকশন ও রাউটিং
+if (strpos($to_email, 'yahoo') !== false) {
+    // Yahoo রিসিভারের জন্য Yahoo সেন্ডার খুঁজবে
+    $sql = "SELECT * FROM smtp_accounts WHERE today_sent < daily_limit AND email LIKE '%yahoo%' ORDER BY last_used ASC LIMIT 1";
+    $res = $conn->query($sql);
+    if ($res->num_rows > 0) { $smtp = $res->fetch_assoc(); $domain_match = true; }
+} 
+elseif (strpos($to_email, 'outlook') !== false || strpos($to_email, 'hotmail') !== false) {
+    // Outlook রিসিভারের জন্য Outlook সেন্ডার
+    $sql = "SELECT * FROM smtp_accounts WHERE today_sent < daily_limit AND (email LIKE '%outlook%' OR email LIKE '%hotmail%' OR email LIKE '%live%') ORDER BY last_used ASC LIMIT 1";
+    $res = $conn->query($sql);
+    if ($res->num_rows > 0) { $smtp = $res->fetch_assoc(); $domain_match = true; }
 }
-$smtp = $smtp_res->fetch_assoc();
+
+// ম্যাচিং না পেলে বা অন্য ডোমেইন হলে জেনারেল রোটেশন
+if (!$smtp) {
+    $smtp_res = $conn->query("SELECT * FROM smtp_accounts WHERE today_sent < daily_limit ORDER BY last_used ASC, id ASC LIMIT 1");
+    if ($smtp_res->num_rows == 0) {
+        echo json_encode(['status' => 'quota_error']);
+        exit;
+    }
+    $smtp = $smtp_res->fetch_assoc();
+}
 
 // ৩. ক্যাম্পেইন লোড
 $camp = $conn->query("SELECT * FROM email_campaign WHERE id=1")->fetch_assoc();
 
-// --- DEEP LOGIC: Message-ID Customization ---
-// Gmail এবং Outlook এর জন্য আলাদা ডোমেইন ফরম্যাট তৈরি করা
-$host_parts = parse_url($smtp['host']);
-$server_domain = isset($host_parts['host']) ? $host_parts['host'] : $smtp['host'];
+// ডিলে (Yahoo টু Yahoo হলে একটু স্লো সেন্ডিং ভালো)
+$delay = (strpos($smtp['email'], 'yahoo') !== false) ? 3 : 1; 
+sleep($delay);
 
-// Gmail এর জন্য স্পেশাল প্যাটার্ন, অন্যদের জন্য জেনেরিক
-if (stripos($smtp['host'], 'gmail') !== false) {
-    $msg_domain = 'mail.gmail.com'; 
-} elseif (stripos($smtp['host'], 'office365') !== false || stripos($smtp['host'], 'outlook') !== false) {
-    $msg_domain = 'eur.prd.01.prod.outlook.com'; // Outlook Internal Server Mimic
-} else {
-    $msg_domain = $server_domain;
-}
-
-// ইউনিক ট্র্যাকিং আইডি
-$unique_id = uniqid('ref_', true);
-$message_id = "<" . md5(uniqid(time()) . $smtp['email']) . "@" . $msg_domain . ">";
-
-// --- HUMAN BEHAVIOR SIMULATION ---
-// রোবোটিক আচরণ এড়াতে ১-২ সেকেন্ড র‍্যান্ডম ডিলে (Gmail এর জন্য খুবই জরুরি)
-sleep(rand(1, 2));
-
-// ৪. মেইল কনফিগারেশন
 $mail = new PHPMailer(true);
 try {
     // সার্ভার সেটিংস
@@ -71,18 +70,15 @@ try {
     $mail->SMTPAuth   = true;
     $mail->Username   = $smtp['email'];
     $mail->Password   = $smtp['password'];
+    $mail->Port       = $smtp['port'];
     
-    // --- PORT & SSL INTELLIGENCE ---
-    $mail->Port = $smtp['port'];
-    
-    // Gmail সাধারণত TLS (587) পছন্দ করে, Yahoo/AOL SSL (465) পছন্দ করে
+    // এনক্রিপশন (465 = SSL, 587 = TLS)
     if ($smtp['port'] == 465) {
         $mail->SMTPSecure = PHPMailer::ENCRYPTION_SMTPS;
     } else {
         $mail->SMTPSecure = PHPMailer::ENCRYPTION_STARTTLS;
     }
 
-    // SSL Certificate Bypass (লোকালহোস্ট বা শেয়ারড হোস্টিং এ এরর ফিক্স করতে)
     $mail->SMTPOptions = [
         'ssl' => [
             'verify_peer' => false,
@@ -92,78 +88,82 @@ try {
     ];
     
     $mail->CharSet    = 'UTF-8';
-    $mail->Encoding   = 'quoted-printable'; // Base64 এর চেয়ে স্প্যাম স্কোর কম
+    $mail->Encoding   = 'base64'; 
 
-    // --- HEADER MANIPULATION (The Secret Sauce) ---
-    
-    // ১. Sender এবং Reply-To একই রাখা (Trust Score বাড়ায়)
+    // --- HEADERS SETUP ---
     $mail->setFrom($smtp['email'], $camp['sender_name']); 
     $mail->addAddress($client['email']);
+    
+    // Yahoo স্প্যাম ফিক্স: Reply-To অবশ্যই Sender হতে হবে
     $mail->addReplyTo($smtp['email'], $camp['sender_name']);
-    
-    // ২. X-Mailer লুকানো (Bot Detection এড়ানো)
-    $mail->XMailer = ' '; // এটাকে খালি রাখলে PHPMailer ডিফল্ট নাম পাঠাবে না
-    
-    // ৩. Custom Message ID (Gmail/Outlook কে বোকা বানানোর জন্য)
-    $mail->MessageID = $message_id;
 
-    // ৪. Essential Headers for Inbox Delivery
-    $mail->Priority = 3; // 3 = Normal. (1 দিলে স্প্যামে যায়)
-    $mail->addCustomHeader('MIME-Version', '1.0');
-    $mail->addCustomHeader('X-Report-Abuse', 'Please reply with UNSUBSCRIBE'); // Yahoo ট্রাস্ট করে
-    $mail->addCustomHeader('List-Unsubscribe', '<mailto:'.$smtp['email'].'?subject=unsubscribe>');
-    $mail->addCustomHeader('Auto-Submitted', 'auto-generated'); // Outlook এর জন্য
+    // --- MESSAGE-ID LOGIC (CRITICAL FIX) ---
+    // Yahoo এর জন্য আমরা কাস্টম Message-ID দেবো না, সার্ভারকে দিতে দেবো।
+    // অন্যথায় Yahoo এটাকে স্প্যাম হিসেবে ডিটেক্ট করে।
+    if (stripos($smtp['host'], 'yahoo') === false && stripos($smtp['host'], 'aol') === false) {
+        // Gmail/Outlook এর জন্য কাস্টম ID (Trust Score বাড়ায়)
+        $host_parts = parse_url($smtp['host']);
+        $server_domain = isset($host_parts['host']) ? $host_parts['host'] : $smtp['host'];
+        
+        if (stripos($smtp['host'], 'gmail') !== false) {
+            $msg_domain = 'mail.gmail.com';
+        } elseif (stripos($smtp['host'], 'office365') !== false) {
+            $msg_domain = 'eur.prd.01.prod.outlook.com';
+        } else {
+            $msg_domain = $server_domain;
+        }
+        $mail->MessageID = "<" . md5(uniqid(time()) . $smtp['email']) . "@" . $msg_domain . ">";
+    }
+    // Yahoo/AOL এর জন্য $mail->MessageID সেট করা হলো না (অটোমেটিক জেনারেট হবে)
 
-    // --- Body & Content Optimization ---
+    // --- GENERIC HEADERS ---
+    // Yahoo এর জন্য X-Mailer ব্ল্যাঙ্ক রাখাই ভালো, অথবা জেনেরিক নাম
+    $mail->XMailer = 'Microsoft Outlook 16.0'; 
+    $mail->Priority = 3; 
+    
+    // List-Unsubscribe (Yahoo ইনবক্সের জন্য বাধ্যতামূলক)
+    $mail->addCustomHeader('List-Unsubscribe', '<mailto:'.$smtp['email'].'?subject=Unsubscribe>');
+    
+    // কনটেন্ট
     $mail->isHTML(true);
     $mail->Subject = $camp['subject'];
     
-    // লোগো বসানো
     $htmlBody = str_replace('{{LOGO}}', $camp['logo_url'], $camp['body']);
     
-    // ক্লিন ফুটার (ফিজিক্যাল এড্রেস না থাকলে স্প্যামে যায়)
-    $footer_style = "color:#6b7280; font-size:11px; line-height:1.5; margin-top:30px; border-top:1px solid #e5e7eb; padding-top:10px;";
-    $footer = "<div style='$footer_style'>
-        This email was sent to {$client['email']}. If you did not request this, please ignore it.<br>
-        <a href='mailto:{$smtp['email']}?subject=Unsubscribe' style='color:#6366f1; text-decoration:none;'>Unsubscribe</a> | Privacy Policy
+    // ফুটার
+    $footer = "<div style='margin-top:20px; padding-top:10px; border-top:1px solid #ddd; font-size:11px; color:#777;'>
+        <p>This message was sent to {$client['email']}.</p>
+        <p><a href='mailto:{$smtp['email']}?subject=Unsubscribe' style='color:#555; text-decoration:none;'>Unsubscribe</a></p>
     </div>";
     
     $mail->Body = $htmlBody . $footer;
-    
-    // প্লেইন টেক্সট ভার্সন (Anti-Spam এর জন্য বাধ্যতামূলক)
-    // HTML ট্যাগ সরিয়ে শুধু টেক্সট রাখা
-    $mail->AltBody = strip_tags(str_replace(['<br>', '</div>'], ["\n", "\n"], $htmlBody)) . "\n\nUnsubscribe: Reply with UNSUBSCRIBE";
+    $mail->AltBody = strip_tags($htmlBody);
 
-    // ৫. সেন্ড করা
     $mail->send();
 
-    // --- সফল: ডাটাবেস আপডেট ---
+    // ডাটাবেস আপডেট
     $conn->query("UPDATE clients SET status = 'Sent' WHERE id = " . $client['id']);
-    
-    // SMTP Usage আপডেট + Last Used Time
     $conn->query("UPDATE smtp_accounts SET today_sent = today_sent + 1, last_used = NOW() WHERE id = " . $smtp['id']);
 
+    // লগ
+    $routeTag = $domain_match ? "<span style='color:#0ea5e9'>[Smart]</span>" : "";
     echo json_encode([
         'status' => 'success', 
-        'log' => "<span style='color:#10b981'>✔ Sent: {$client['email']}</span> <small style='color:#94a3b8'>via {$smtp['email']}</small>"
+        'log' => "<span style='color:#10b981'>✔ Sent: {$client['email']}</span> <small style='color:#94a3b8'>via {$smtp['email']} $routeTag</small>"
     ]);
 
 } catch (Exception $e) {
-    // ফেইল হ্যান্ডলিং
     $conn->query("UPDATE clients SET status = 'Failed' WHERE id = " . $client['id']);
     
+    $errorMsg = $mail->ErrorInfo;
     // এরর মেসেজ ক্লিন করা
-    $rawError = $mail->ErrorInfo;
-    $shortError = "Connection Error";
-    
-    // কমন এরর ডিটেকশন
-    if (strpos($rawError, 'connect()') !== false) $shortError = "Connection Blocked (Check Port/Pass)";
-    if (strpos($rawError, 'Authentication') !== false) $shortError = "Wrong Password/App Password";
-    if (strpos($rawError, 'Data not accepted') !== false) $shortError = "Spam Filter Blocked Content";
+    if (strpos($errorMsg, 'connect()') !== false) $errorMsg = "Connection Timeout";
+    elseif (strpos($errorMsg, 'Authentication') !== false) $errorMsg = "Auth Failed (Check Pass)";
+    elseif (strpos($errorMsg, 'data not accepted') !== false) $errorMsg = "Spam Rejected";
 
     echo json_encode([
         'status' => 'error', 
-        'log' => "<span style='color:#ef4444'>❌ Failed: {$client['email']}</span> <br><small style='color:#fbbf24'>$shortError</small>"
+        'log' => "<span style='color:#ef4444'>❌ Failed: {$client['email']}</span> <small style='color:#fbbf24'>($errorMsg)</small>"
     ]);
 }
 ?>
